@@ -3,9 +3,11 @@ from DataModels import *
 from DataInput import generate_ntsp_input, ntsp_input_from_batch
 from DataVisual import plot_before_after, plot_single_run, avg_metric
 import pandas as pd
+import numpy as np
 
 
 if __name__ == "__main__":
+    np.random.seed(0)
 
     # --- SINGLE BATCH ---
 
