@@ -58,7 +58,7 @@ class Transaction(BaseModel):
     credit_account: int = Field(..., description="ID of the account credited.")
     security_id: int = Field(..., description="ID of the security traded.")
     quantity: int = Field(..., description="Quantity of securities exchanged (qₜ).")
-    security_flow: int = Field(..., description="Flow direction: -1 for outflow, +1 for inflow.")
+    # security_flow: int = Field(..., description="Flow direction: -1 for outflow, +1 for inflow.")
 
 
 class CollateralLink(BaseModel):
@@ -113,3 +113,8 @@ class NTSPInput(BaseModel):
     collateral_links: List[CollateralLink] = Field(..., description="List of collateral links (SPL).")
     after_links: List[AfterLink] = Field(..., description="List of ordering constraints (Eq. (5)).")
     security_positions: List[SecurityPosition] = Field(..., description="List of security positions.")
+
+
+
+def NTSP_print(model: NTSPInput):
+    1

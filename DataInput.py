@@ -7,7 +7,25 @@ import pandas as pd
 
 
 
-def gen_init_conditions(batch):
+def ntsp_input_from_batch(batch):
+    accs, sec_poss, coll_links = _gen_init_conditions(batch)
+    trans, after_links = _transactions_from_csv(batch)
+
+    for cl in coll_links:
+        cl.triggered_transactions = [t.id for t in trans if t.security_id == cl.security_id]
+
+    return NTSPInput(
+        transactions=trans,
+        accounts=accs,
+        collateral_links=coll_links,
+        after_links=after_links,
+        security_positions=sec_poss
+    )
+
+
+
+
+def _gen_init_conditions(batch):
     all_securities = batch["security"].unique()
     all_parties = pd.concat([batch["to"], batch["from"]]).unique()
 
@@ -15,12 +33,13 @@ def gen_init_conditions(batch):
     security_positions = []
     sec_collateral_links = []
 
+    cli = 1
     for party in all_parties:
         party_buys = batch.loc[batch["to"] == party]
         avg_cash_sell = np.mean(np.multiply(party_buys["price"], party_buys["quantity"]))
 
-        init_cash = max(10000, 1.5*avg_cash_sell + np.random.normal(0.5*avg_cash_sell, 0.5*avg_cash_sell))
-        cash_credit_limit = max(5000, init_cash + np.random.normal(0.5*init_cash, 0.5*init_cash))
+        init_cash = max(25000, 2.5*avg_cash_sell + np.random.normal(1.5*avg_cash_sell, 1.5*avg_cash_sell))
+        cash_credit_limit = max(25000, 2*init_cash + np.random.normal(init_cash, 1.5*init_cash))
 
         p_acc = Account(
             id=hash(party),
@@ -30,14 +49,15 @@ def gen_init_conditions(batch):
             )
         cash_accounts.append(p_acc)
 
+        
         for security in all_securities:
             party_sells = batch.loc[(batch["from"] == party) & (batch["security"] == security)]
 
             if len(party_sells.index) > 0:
                 avg_sec_sell = np.mean(party_sells["quantity"])
-                init_sec = max(500, 1.5*avg_sec_sell + np.random.normal(0.5*avg_sec_sell, 0.5*avg_sec_sell))
+                init_sec = max(10000, 2.5*avg_sec_sell + np.random.normal(1.5*avg_sec_sell, 1.5*avg_sec_sell))
             else:
-                init_sec = 500 * int(np.random.random() > 0.75)
+                init_sec = 10000 * int(np.random.random() > 0.75)
             
             p_sec_pos = SecurityPosition(
                 id=hash(security),
@@ -46,21 +66,60 @@ def gen_init_conditions(batch):
             )
             security_positions.append(p_sec_pos)
 
-
-            if (len(party_sells.index) > 0) and (avg_sec_sell >= 0.75*np.mean(batch.loc[batch["from"] == party]["quantity"])) and (np.random.random() > 0.5):
+            if (len(party_sells.index) > 0) and (avg_sec_sell >= 0.5*np.mean(batch.loc[batch["from"] == party]["quantity"])) and (np.random.random() > 0.2):
                 c_link_sec_party = CollateralLink(
-                    id=np.random.randint(0, 10000000),
+                    id=cli,
                     associated_account=hash(party),
-                    lot_size=20,
+                    lot_size=500,
                     valuation=0.95*np.mean(party_sells["price"]),
-                    q_min=0,
-                    q_lim=int(np.floor((0.5 + np.random.random())*init_sec)),
+                    q_min=500,
+                    q_lim=int(np.floor((0.5 + np.random.random())*init_sec*2)),
                     triggered_transactions=[],  # to be set later.
                     security_id=hash(security)
                 )
+                cli = cli + 1
                 sec_collateral_links.append(c_link_sec_party)
 
     return cash_accounts, security_positions, sec_collateral_links
+
+
+def _transactions_from_csv(batch):
+    transactions = []
+
+    for index, row in batch.iterrows():
+        cash_amount = row["price"] * row["quantity"]
+
+        priority = 0.5*abs(np.log(np.power(cash_amount, 0.25) * len(batch.loc[(batch["from"] == row["from"]) | 
+                                                        (batch["from"] == row["to"]) | 
+                                                        (batch["to"] == row["from"]) | 
+                                                        (batch["to"] == row["to"])].index)))
+
+        trans = Transaction(
+            id=index,
+            cash_amount=cash_amount,
+            weight=priority,
+            debit_account=hash(row["to"]),
+            credit_account=hash(row["from"]),
+            security_id=hash(row["security"]),
+            quantity=int(row["quantity"]),
+        )
+        transactions.append(trans)
+    
+    after_links = []
+    all_parties = pd.concat([batch["to"], batch["from"]]).unique()
+
+    for party in all_parties:
+        party_transactions = batch.loc[(batch["from"] == party) | (batch["to"] == party)]
+        if (len(party_transactions.index) > 0.05*len(batch.index)) and (len(party_transactions.index) > 6) and (np.random.rand() > 0.75):
+            for k in [0, 2, 4]:
+                linkk = AfterLink(
+                    t1=party_transactions.iloc[k].name,
+                    t2=party_transactions.iloc[k+1].name)
+                after_links.append(linkk)
+
+
+    return transactions, after_links
+
 
 
 def generate_ntsp_input(
@@ -96,7 +155,7 @@ def generate_ntsp_input(
     Returns:
         A valid NTSPInput instance.
     """
-    random.seed(42)  # For reproducibility
+    # random.seed(42)  # For reproducibility
 
     # 1) Define a list of distinct security IDs.
     securities = list(range(101, 101 + n_securities))
@@ -117,14 +176,14 @@ def generate_ntsp_input(
     # Ensure each distinct security is held by at least one account.
     security_positions = []
     for sec in securities:
-        # Randomly assign this security to one of the accounts.
-        acc_id = random.choice([acc.id for acc in accounts])
-        init_qty = random.randint(100, 1000)
-        security_positions.append(SecurityPosition(
-            id=sec,
-            account_id=acc_id,
-            initial_quantity=init_qty
-        ))
+        for acc_id in random.choices([acc.id for acc in accounts], k = random.randint(2, n_accounts // 2)):
+            # Randomly assign this security to one of the accounts.
+            init_qty = random.randint(100, 1000)
+            security_positions.append(SecurityPosition(
+                id=sec,
+                account_id=acc_id,
+                initial_quantity=init_qty
+            ))
 
     # 4) Generate Transactions.
     transactions = []
@@ -138,7 +197,7 @@ def generate_ntsp_input(
         sec_id = random.choice(securities)
         # For simplicity, all transactions here reduce the security position (outflow).
         quantity = random.randint(10, 100)
-        security_flow = -1
+        #security_flow = -1
         transactions.append(Transaction(
             id=i,
             cash_amount=cash_amount,
@@ -147,7 +206,7 @@ def generate_ntsp_input(
             credit_account=credit_acc,
             security_id=sec_id,
             quantity=quantity,
-            security_flow=security_flow
+           # security_flow=security_flow
         ))
 
     # Ensure each security is used by at least one transaction.
