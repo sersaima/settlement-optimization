@@ -63,12 +63,12 @@ def plot_single_run(batch_metrics):
 
     str1 = f'Avg Settlement Success:  {"{0:0.2f}".format(100*avg_metric(batch_metrics, "settle_rate"))}%\n'
     str2 = f'Avg Auto-Collateral Used:  ${"{0:0.0f}".format(avg_metric(batch_metrics, "total_loan"))}'
-        
+
     # these are matplotlib.patch.Patch properties
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
 
     # place a text box in upper left in axes coords
-    
+
 
     ax.legend(loc=2)
     ax2.legend(loc=1)

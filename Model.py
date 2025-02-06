@@ -210,7 +210,7 @@ def solve_ntsp(ntsp_data: NTSPInput, lambda_weight: float = 0.5, print_console =
 
     # Add security position constraints (Eq. (2b)).
     add_security_position_constraints(solver, ntsp_data, x, y)
-    
+
 
 
     # Solve the model.
@@ -222,9 +222,9 @@ def solve_ntsp(ntsp_data: NTSPInput, lambda_weight: float = 0.5, print_console =
         for t in ntsp_data.transactions:
             metrics["total_cashflow"] += int(x[t.id].solution_value()) * t.cash_amount
             metrics["settle_rate"] += int(x[t.id].solution_value())
-        
+
         metrics["settle_rate"] = metrics["settle_rate"] / len(ntsp_data.transactions)
-        
+
         metrics["total_loan"] = 0
         for sp in ntsp_data.security_positions:
             collateral_total = sum(l.lot_size * y[l.id].solution_value()
@@ -238,7 +238,7 @@ def solve_ntsp(ntsp_data: NTSPInput, lambda_weight: float = 0.5, print_console =
             print("Objective Value =", solver.Objective().Value())
             print("\nTransaction Settlement Decisions:")
             for t in ntsp_data.transactions:
-                print(f"  Transaction {t.id}: x = {"Success" if int(x[t.id].solution_value()) else "Failed"}")
+                print(f"  Transaction {t.id}: x = {'Success' if int(x[t.id].solution_value()) else 'Failed'}")
 
             # print("\nAccount Cash Status (need variables):")
             # for acc in ntsp_data.accounts:
@@ -249,7 +249,7 @@ def solve_ntsp(ntsp_data: NTSPInput, lambda_weight: float = 0.5, print_console =
                 if int(z[l.id].solution_value()):
                     print(f"  Collateral Link {l.id} (Security {l.security_id}): Lots amount (y) = {y[l.id].solution_value()}, "
                         f"For account {l.associated_account}. \tUsed in {len(l.triggered_transactions)} transactions.")
-                
+
             print("\nSecurity Position Summary:")
             T_debit_sec, T_credit_sec = get_security_transaction_lookups(ntsp_data)
             for sp in ntsp_data.security_positions:
