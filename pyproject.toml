@@ -1,0 +1,7 @@
+[project]
+name = "settlement-optimization"
+version = "0.1.0"
+description = "Contains the code to run the transaction settlement optimization problem"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
