@@ -65,17 +65,42 @@ def build_decision_variables(solver, ntsp_data: NTSPInput):
       y: Dict mapping collateral link IDs to integer variables (number of lots pledged; Eq. (4b)).
       z: Dict mapping collateral link IDs to binary activation variables.
       need: Dict mapping account IDs to continuous variables representing extra cash needed.
+      pab_need: Dict mapping PAB account IDs to continuous variables for PAB accounts.
+      haircut: Dict mapping security IDs to continuous variables for collateral haircuts.
+      sbs_seg: Dict mapping security-based swap account IDs to binary segregation variables.
     """
+    # Original decision variables
     x = {t.id: solver.BoolVar(f"x_{t.id}") for t in ntsp_data.transactions}
     y = {l.id: solver.IntVar(0, l.q_lim, f"y_{l.id}") for l in ntsp_data.collateral_links}
     z = {l.id: solver.BoolVar(f"z_{l.id}") for l in ntsp_data.collateral_links}
 
+    # Account needs variables
     need = {}
+    pab_need = {}
     for acc in ntsp_data.accounts:
-        # Upper bound: sum of cash amounts for transactions debiting this account.
+        # Upper bound: sum of cash amounts for transactions debiting this account
         ub = sum(t.cash_amount for t in ntsp_data.transactions if t.debit_account == acc.id)
         need[acc.id] = solver.NumVar(0, ub, f"need_{acc.id}")
-    return x, y, z, need
+        # Separate variable for PAB accounts
+        if hasattr(acc, 'is_pab') and acc.is_pab:
+            pab_need[acc.id] = solver.NumVar(0, ub, f"pab_need_{acc.id}")
+
+    # Haircut variables for non-US government securities
+    haircut = {}
+    for pos in ntsp_data.security_positions:
+        if pos.id not in haircut:
+            if hasattr(pos, 'is_non_us_gov') and pos.is_non_us_gov:
+                haircut[pos.id] = solver.NumVar(0.05, 1.0, f"haircut_{pos.id}")  # Minimum 5% haircut
+            else:
+                haircut[pos.id] = solver.NumVar(0.0, 1.0, f"haircut_{pos.id}")
+
+    # Security-based swap segregation variables
+    sbs_seg = {}
+    for acc in ntsp_data.accounts:
+        if hasattr(acc, 'has_sbs') and acc.has_sbs:
+            sbs_seg[acc.id] = solver.BoolVar(f"sbs_seg_{acc.id}")
+
+    return x, y, z, need, pab_need, haircut, sbs_seg
 
 
 def add_objective(solver, ntsp_data: NTSPInput, x: Dict[int, any], lambda_weight: float):
@@ -92,30 +117,54 @@ def add_objective(solver, ntsp_data: NTSPInput, x: Dict[int, any], lambda_weight
 
 
 def add_account_constraints(solver, ntsp_data: NTSPInput, x: Dict[int, any],
-                            need: Dict[int, any], y: Dict[int, any]):
+                            need: Dict[int, any], pab_need: Dict[int, any], y: Dict[int, any],
+                            haircut: Dict[int, any]):
     """
-    Adds account cash constraints corresponding to Eq. (2a)/(4a).
+    Adds account cash constraints corresponding to Eq. (2a)/(4a) with updated regulatory requirements.
 
     For each Account A:
-      Let T_debit(A) and T_credit(A) be the transactions debiting and crediting A.
-      Enforce:
-          (∑ₜ∈T_debit(A) aₜ·xₜ - ∑ₜ∈T_credit(A) aₜ·xₜ) ≤ initial_cash + collateral_expr,
-      where collateral_expr = ∑_{l with associated_account == A.id} (lot_size * valuation * y[l]),
-      and also ensure that collateral_expr ≤ credit_limit.
-    Also, define:
-          need[A] ≥ (∑ₜ∈T_debit(A) aₜ·xₜ - ∑ₜ∈T_credit(A) aₜ·xₜ - initial_cash).
+      - Maintains separate constraints for customer and PAB accounts
+      - Implements concentration limits for bank deposits
+      - Applies haircut requirements for non-US government securities
+      - Enforces state/municipal obligation limits
     """
     T_debit, T_credit = get_transaction_lookups(ntsp_data)
     transactions_dict = {t.id: t for t in ntsp_data.transactions}
+
     for acc in ntsp_data.accounts:
+        # Basic cash flow constraints
         debit_sum = solver.Sum([transactions_dict[t_id].cash_amount * x[t_id] for t_id in T_debit[acc.id]])
         credit_sum = solver.Sum([transactions_dict[t_id].cash_amount * x[t_id] for t_id in T_credit[acc.id]])
-        solver.Add(need[acc.id] >= debit_sum - credit_sum - acc.initial_cash)
+
+        # Apply haircuts to collateral
         collateral_expr = solver.Sum([
-            l.lot_size * l.valuation * y[l.id]
+            l.lot_size * l.valuation * (1 - 0.05) * y[l.id]
             for l in ntsp_data.collateral_links if l.associated_account == acc.id
         ])
-        solver.Add(debit_sum - credit_sum <= acc.initial_cash + collateral_expr)
+
+        # Separate handling for PAB accounts
+        if hasattr(acc, 'is_pab') and acc.is_pab:
+            solver.Add(pab_need[acc.id] >= debit_sum - credit_sum - acc.initial_cash)
+            solver.Add(debit_sum - credit_sum <= acc.initial_cash + collateral_expr)
+        else:
+            solver.Add(need[acc.id] >= debit_sum - credit_sum - acc.initial_cash)
+            solver.Add(debit_sum - credit_sum <= acc.initial_cash + collateral_expr)
+
+        # Bank deposit concentration limits (15% of bank's equity capital)
+        if hasattr(acc, 'bank_equity_capital'):
+            solver.Add(collateral_expr <= 0.15 * acc.bank_equity_capital)
+
+        # State/municipal obligations limits
+        if hasattr(acc, 'state_muni_holdings'):
+            # Single issuer limit (2% of required reserve)
+            for issuer_id, amount in acc.state_muni_holdings.items():
+                solver.Add(amount <= 0.02 * need[acc.id])
+
+            # Aggregate limit (10% of required reserve)
+            total_state_muni = solver.Sum([amount for amount in acc.state_muni_holdings.values()])
+            solver.Add(total_state_muni <= 0.10 * need[acc.id])
+
+        # General credit limit constraint
         solver.Add(collateral_expr <= acc.credit_limit)
 
 
@@ -172,6 +221,53 @@ def add_security_position_constraints(solver, ntsp_data: NTSPInput, x: Dict[int,
         solver.Add(debit_qty - credit_qty <= sp.initial_quantity - collateral_qty)
 
 
+def add_sbs_segregation_constraints(solver, ntsp_data: NTSPInput, x: Dict[int, any],
+                                    sbs_seg: Dict[int, any], need: Dict[int, any]):
+    """
+    Adds segregation constraints for security-based swap (SBS) accounts.
+
+    Implements the new regulatory requirements for:
+    - Segregation of SBS customer assets
+    - Special reserve requirements for SBS accounts
+    - Handling of non-cleared security-based swaps
+    """
+    # Get SBS transactions
+    sbs_transactions = [t for t in ntsp_data.transactions if hasattr(t, 'is_sbs') and t.is_sbs]
+
+    for acc in ntsp_data.accounts:
+        if hasattr(acc, 'has_sbs') and acc.has_sbs:
+            # Get SBS transactions for this account
+            acc_sbs_transactions = [t for t in sbs_transactions
+                                  if t.debit_account == acc.id or t.credit_account == acc.id]
+
+            # Segregation activation based on SBS activity
+            solver.Add(sbs_seg[acc.id] >= solver.Sum([x[t.id] for t in acc_sbs_transactions]) / len(acc_sbs_transactions))
+
+            # When segregation is active, enforce reserve requirements
+            if hasattr(acc, 'sbs_reserve_requirement'):
+                solver.Add(need[acc.id] >= acc.sbs_reserve_requirement * sbs_seg[acc.id])
+
+            # Special handling for non-cleared SBS
+            non_cleared_sbs = [t for t in acc_sbs_transactions if hasattr(t, 'is_cleared') and not t.is_cleared]
+            if non_cleared_sbs:
+                # Additional reserve requirements for non-cleared SBS
+                if hasattr(acc, 'non_cleared_sbs_reserve'):
+                    solver.Add(need[acc.id] >=
+                             acc.non_cleared_sbs_reserve *
+                             solver.Sum([x[t.id] for t in non_cleared_sbs]))
+
+                # Ensure proper segregation of non-cleared SBS positions
+                solver.Add(sbs_seg[acc.id] >=
+                         solver.Sum([x[t.id] for t in non_cleared_sbs]) / len(non_cleared_sbs))
+
+            # Block cross-use of segregated assets
+            for t in ntsp_data.transactions:
+                if ((t.debit_account == acc.id or t.credit_account == acc.id) and
+                    not hasattr(t, 'is_sbs')):
+                    # Non-SBS transactions can't use segregated assets
+                    solver.Add(x[t.id] <= 1 - sbs_seg[acc.id])
+
+
 # ============================================================
 # Main Model Solver Function
 # ============================================================
@@ -194,13 +290,13 @@ def solve_ntsp(ntsp_data: NTSPInput, lambda_weight: float = 0.5, print_console =
         return
 
     # Build decision variables.
-    x, y, z, need = build_decision_variables(solver, ntsp_data)
+    x, y, z, need, pab_need, haircut, sbs_seg = build_decision_variables(solver, ntsp_data)
 
     # Add the objective function (Eq. (1)).
     add_objective(solver, ntsp_data, x, lambda_weight)
 
     # Add account constraints (Eqs. (2a) and (4a)).
-    add_account_constraints(solver, ntsp_data, x, need, y)
+    add_account_constraints(solver, ntsp_data, x, need, pab_need, y, haircut)
 
     # Add after-link ordering constraints (Eq. (5)).
     add_after_link_constraints(solver, ntsp_data, x)
@@ -210,6 +306,9 @@ def solve_ntsp(ntsp_data: NTSPInput, lambda_weight: float = 0.5, print_console =
 
     # Add security position constraints (Eq. (2b)).
     add_security_position_constraints(solver, ntsp_data, x, y)
+
+    # Add segregation constraints for security-based swap (SBS) accounts.
+    add_sbs_segregation_constraints(solver, ntsp_data, x, sbs_seg, need)
 
 
 
